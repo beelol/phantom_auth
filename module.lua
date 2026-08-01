@@ -3,9 +3,38 @@ local default_providers = require "main.phantom.providers"
 
 local Phantom = {}
 
+local function default_logger(event, fields)
+  local parts = { "[phantom-auth]", "event=" .. tostring(event) }
+  local keys = {}
+  for key in pairs(fields or {}) do
+    table.insert(keys, key)
+  end
+  table.sort(keys)
+  for _, key in ipairs(keys) do
+    table.insert(parts, tostring(key) .. "=" .. tostring(fields[key]))
+  end
+  print(table.concat(parts, " "))
+end
+
+local function error_code(err)
+  if type(err) ~= "table" then
+    return tostring(err or "unknown")
+  end
+  if type(err.error) == "table" and err.error.code then
+    return tostring(err.error.code)
+  end
+  if type(err.data) == "table" and type(err.data.error) == "table" and err.data.error.code then
+    return tostring(err.data.error.code)
+  end
+  if type(err.data) == "table" and type(err.data.data) == "table"
+    and type(err.data.data.error) == "table" and err.data.data.error.code then
+    return tostring(err.data.data.error.code)
+  end
+  return tostring(err.code or err.status or err.message or "unknown")
+end
+
 local function is_account_linked_error(err)
-  local s = tostring(err)
-  return s:find("AccountLinked") ~= nil or s:find("403") ~= nil
+  return error_code(err) == "account_linked" or tostring(err):find("AccountLinked") ~= nil
 end
 
 local function resolve_options(opts_or_url)
@@ -26,38 +55,47 @@ local function make_instance(opts_or_url)
     bridge = opts.bridge,
     identity = opts.identity or default_identity,
     providers = opts.providers or default_providers,
+    logger = opts.logger or default_logger,
     gamecenter_state = {
       status = "not_attempted",
       error = nil,
     },
   }
 
+  if self.providers.set_logger then
+    self.providers.set_logger(self.logger)
+  end
+
+  function self:log(event, fields)
+    self.logger(event, fields or {})
+  end
+
   if opts.backend_url and self.bridge and self.bridge.init then
     self.bridge.init(opts.backend_url)
   end
 
   function self:auto_sign_in_anon(callback)
+    self:log("auth.guest.started")
     local uuid = self.identity.get_uuid()
     if not uuid then
       uuid = self.identity.generate_uuid()
       self.identity.save_uuid(uuid)
-      print("Login: Generated New Guest UUID: " .. uuid)
-    else
-      print("Login: Using Existing Guest UUID: " .. uuid)
+      self:log("auth.guest.identity_created")
     end
 
     self.bridge.login_guest(uuid, function(result, err)
       if err then
-        print("Login: Guest Login Failed: " .. tostring(err))
-
         if is_account_linked_error(err) then
-          print("LOGIN: Account Linked! Please Sign In.")
+          self:log("auth.guest.account_linked", { error_code = "account_linked" })
           callback(nil, "AccountLinked")
         else
+          self:log("auth.guest.failed", { error_code = error_code(err) })
           callback(nil, err)
         end
       else
-        print("Login: Guest Login Success")
+        self:log("auth.guest.succeeded", {
+          user_id = result and result.record and result.record.id or "unknown"
+        })
         callback(result, nil)
       end
     end)
@@ -69,27 +107,69 @@ local function make_instance(opts_or_url)
   end
 
   function self:link_account(provider, current_auth_token, callback)
-    print("Login: Linking Account with " .. provider)
+    self:log("auth.platform_link.started", { provider = provider })
 
     self.providers.get_provider_token(provider, function(id_data, err)
       if err then
-        print("Login: Failed to get provider token: " .. tostring(err))
+        self:log("auth.platform_link.failed", { provider = provider, error_code = error_code(err) })
         callback(nil, err)
         return
       end
 
-      print("Login: Provider token acquired for " .. provider)
-
       self.bridge.link_account(provider, id_data, current_auth_token, function(result, link_err)
         if link_err then
-          print("Login: Link Account Failed: " .. tostring(link_err))
+          self:log("auth.platform_link.failed", { provider = provider, error_code = error_code(link_err) })
           callback(nil, link_err)
         else
-          print("Login: Link Account Success")
+          self:log("auth.platform_link.succeeded", { provider = provider })
           callback(result, nil)
         end
       end)
     end)
+  end
+
+  function self:sign_in(provider, current_auth_token, callback)
+    self:log("auth.provider.started", { provider = provider })
+    if not self.providers.is_provider_available(provider) then
+      local err = "Provider unavailable: " .. tostring(provider)
+      self:log("auth.provider.failed", { provider = provider, error_code = "provider_unavailable" })
+      callback(nil, err)
+      return
+    end
+
+    self.providers.get_provider_token(provider, function(id_data, token_err)
+      if token_err then
+        self:log("auth.provider.failed", { provider = provider, error_code = error_code(token_err) })
+        callback(nil, token_err)
+        return
+      end
+
+      self:log("auth.provider.token_received", { provider = provider })
+      self.bridge.sign_in(provider, id_data, current_auth_token, function(result, sign_in_err)
+        if sign_in_err then
+          self:log("auth.provider.failed", { provider = provider, error_code = error_code(sign_in_err) })
+          callback(nil, sign_in_err)
+          return
+        end
+
+        self:log("auth.provider.succeeded", {
+          provider = provider,
+          user_id = result and result.record and result.record.id or "unknown"
+        })
+        if type(result) == "table" and type(id_data) == "table" then
+          result._provider_user_id = id_data.user_id
+        end
+        callback(result, nil)
+      end)
+    end)
+  end
+
+  function self:get_credential_state(provider, user_id, callback)
+    if not self.providers.get_credential_state then
+      callback(nil, "Credential-state checks unavailable")
+      return
+    end
+    self.providers.get_credential_state(provider, user_id, callback)
   end
 
   function self:try_link_gamecenter_silent(current_auth_token, callback)
@@ -134,10 +214,10 @@ local function make_instance(opts_or_url)
   function self:restore_purchases(receipt_data, callback)
     self.bridge.restore_purchases(receipt_data, function(result, err)
       if err then
-        print("Login: Restore Failed: " .. tostring(err))
+        self:log("auth.restore.failed", { error_code = error_code(err) })
         callback(nil, err)
       else
-        print("Login: Restore Success (Account Switched?)")
+        self:log("auth.restore.succeeded")
         callback(result, nil)
       end
     end)
@@ -205,6 +285,19 @@ end
 
 function Phantom.link_account(provider, current_auth_token, callback)
   return require_init():link_account(provider, current_auth_token, callback)
+end
+
+function Phantom.sign_in(provider, current_auth_token, callback)
+  return require_init():sign_in(provider, current_auth_token, callback)
+end
+
+function Phantom.is_provider_available(provider)
+  local instance = require_init()
+  return instance.providers.is_provider_available(provider)
+end
+
+function Phantom.get_credential_state(provider, user_id, callback)
+  return require_init():get_credential_state(provider, user_id, callback)
 end
 
 function Phantom.try_link_gamecenter_silent(current_auth_token, callback)

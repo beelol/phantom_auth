@@ -24,7 +24,6 @@ function M.get_uuid()
   -- 1. Try System ID (IDFV on iOS, Android ID on Android)
   local info = sys.get_sys_info()
   if info.device_ident and info.device_ident ~= "unknown" and info.device_ident ~= "" then
-    print("Identity: Using System Device ID: " .. info.device_ident)
     return info.device_ident
   end
 

@@ -1,4 +1,5 @@
 local M = {}
+local logger = function() end
 local gc = {
   initialized = false,
   status = "idle", -- idle | pending | needs_ui | authenticated | error
@@ -9,6 +10,14 @@ local gc = {
   pending_callback = nil,
   request_id = 0
 }
+
+local function emit(event, fields)
+  logger(event, fields or {})
+end
+
+function M.set_logger(value)
+  logger = value or function() end
+end
 
 local function gc_complete_with_error(err)
   gc.status = "error"
@@ -40,9 +49,9 @@ end
 
 function M.is_provider_available(provider)
   if provider == "apple" then
-    return siwa ~= nil
+    return siwa ~= nil and siwa.is_supported ~= nil and siwa.is_supported()
   elseif provider == "google" then
-    return gpgs ~= nil
+    return false
   elseif provider == "gamecenter" then
     return gamekit ~= nil
   end
@@ -59,71 +68,27 @@ function M.get_gamecenter_debug_state()
 end
 
 function M.get_provider_token(provider, callback)
-  print("Providers: Attempting " .. provider .. " Login")
-
   if provider == "apple" then
-    print("Apple spotted")
-
-    if not siwa then
-      print("SIWA extension missing")
-
+    if not M.is_provider_available("apple") then
       callback(nil, "SIWA extension missing")
       return
     end
 
     siwa.authenticate(function(self, data)
-      print("siwa.authenticate callback")
-      pprint(data)
-
       if not data then
         callback(nil, "Apple Auth Failed: no response data")
         return
       end
 
-      if data.result == "OK" and data.identity_token then
-        print("siwa.authenticate callback: Apple Auth Success")
-        callback({ token = data.identity_token }, nil)
+      if data.result == "SUCCESS" and data.identity_token then
+        callback({ token = data.identity_token, user_id = data.user_id }, nil)
         return
       end
 
       callback(nil, "Apple Auth Failed: " .. tostring(data.message or data.result))
     end)
   elseif provider == "google" then
-    if not gpgs then
-      callback(nil, "GPGS extension missing")
-      return
-    end
-
-    -- Ensure silent login or interactive based on state?
-    -- For "Link", we usually want interactive if silent fails.
-    -- But for simplicity here, we assume standard flow.
-
-    if gpgs.is_logged_in() then
-      local id_token = gpgs.get_id_token()
-      if id_token then
-        callback({ token = id_token }, nil)
-      else
-        callback(nil, "GPGS Logged in but no ID Token")
-      end
-      return
-    end
-
-    -- Start interactive login
-    gpgs.login()
-    gpgs.set_callback(function(self, message_id, message)
-      if message_id == gpgs.MSG_SIGN_IN or message_id == gpgs.MSG_SILENT_SIGN_IN then
-        if message.status == gpgs.STATUS_SUCCESS then
-          local id_token = gpgs.get_id_token()
-          if id_token then
-            callback({ token = id_token }, nil)
-          else
-            callback(nil, "GPGS Login success but ID Token was nil")
-          end
-        else
-          callback(nil, "GPGS Login failed: " .. tostring(message.error))
-        end
-      end
-    end)
+    callback(nil, "Google account sign-in is disabled until server token verification is configured")
   elseif provider == "gamecenter" then
     if not gamekit then
       callback(nil, "GameKit extension missing")
@@ -147,9 +112,6 @@ function M.get_provider_token(provider, callback)
 
       -- extension-gamekit docs: callback receives (self, event)
       gamekit.gc_signin(function(self, event)
-        print("gamekit.gc_signin callback")
-        pprint(event)
-
         if not event or not event.type then
           gc_complete_with_error("Game Center sign-in failed: invalid callback event")
           return
@@ -202,6 +164,40 @@ function M.get_provider_token(provider, callback)
     callback(nil, gc.last_error or "Game Center unavailable in current state")
   else
     callback(nil, "Unknown provider: " .. tostring(provider))
+  end
+end
+
+function M.get_credential_state(provider, user_id, callback)
+  if provider ~= "apple" then
+    callback(nil, "Credential-state checks unsupported for provider: " .. tostring(provider))
+    return
+  end
+  if not M.is_provider_available("apple") then
+    callback(nil, "SIWA extension missing")
+    return
+  end
+
+  local started = siwa.get_credential_state(user_id, function(self, data)
+    if not data or data.result ~= "SUCCESS" then
+      callback(nil, data and data.message or "Apple credential-state check failed")
+      return
+    end
+    local state = "unknown"
+    if data.credential_state == siwa.STATE_AUTHORIZED then
+      state = "authorized"
+    elseif data.credential_state == siwa.STATE_REVOKED then
+      state = "revoked"
+    elseif data.credential_state == siwa.STATE_NOT_FOUND then
+      state = "not_found"
+    end
+    emit("auth.provider.credential_state", {
+      provider = "apple",
+      credential_state = state
+    })
+    callback(state, nil)
+  end)
+  if not started then
+    callback(nil, "Apple credential-state check did not start")
   end
 end
 
