@@ -1,4 +1,3 @@
-local default_identity = require "main.phantom.identity"
 local default_providers = require "main.phantom.providers"
 
 local Phantom = {}
@@ -50,10 +49,11 @@ end
 local function make_instance(opts_or_url)
   local opts = resolve_options(opts_or_url)
   assert(opts.bridge, "phantom.module requires opts.bridge (no default project bridge)")
+  assert(opts.credentials, "phantom.module requires opts.credentials")
 
   local self = {
     bridge = opts.bridge,
-    identity = opts.identity or default_identity,
+    credentials = opts.credentials,
     providers = opts.providers or default_providers,
     logger = opts.logger or default_logger,
     gamecenter_state = {
@@ -76,14 +76,14 @@ local function make_instance(opts_or_url)
 
   function self:auto_sign_in_anon(callback)
     self:log("auth.guest.started")
-    local uuid = self.identity.get_uuid()
-    if not uuid then
-      uuid = self.identity.generate_uuid()
-      self.identity.save_uuid(uuid)
-      self:log("auth.guest.identity_created")
+    local credential, load_err = self.credentials.load_guest()
+    if load_err then
+      self:log("auth.storage.read_failed", { error_code = error_code(load_err) })
+      callback(nil, load_err)
+      return
     end
 
-    self.bridge.login_guest(uuid, function(result, err)
+    self.bridge.login_guest(credential, function(result, err)
       if err then
         if is_account_linked_error(err) then
           self:log("auth.guest.account_linked", { error_code = "account_linked" })
@@ -93,10 +93,32 @@ local function make_instance(opts_or_url)
           callback(nil, err)
         end
       else
+        if not credential then
+          local issued = result and result.meta and result.meta.guest_credential
+          if type(issued) ~= "string" or issued == "" then
+            self:log("auth.guest.failed", { error_code = "guest_credential_missing" })
+            callback(nil, "Backend created a guest without returning its credential")
+            return
+          end
+          local saved, save_err = self.credentials.save_guest(issued)
+          if not saved then
+            self:log("auth.storage.write_failed", { error_code = error_code(save_err) })
+            callback(nil, save_err or "Failed to save guest credential")
+            return
+          end
+          result.meta.guest_credential = nil
+          if next(result.meta) == nil then
+            result.meta = nil
+          end
+          self:log("auth.guest.credential_saved")
+        end
         self:log("auth.guest.succeeded", {
-          user_id = result and result.record and result.record.id or "unknown"
+          user_id = result and result.record and result.record.id or "unknown",
+          restored = credential ~= nil,
         })
-        callback(result, nil)
+        callback(result, nil, {
+          restored = credential ~= nil,
+        })
       end
     end)
   end
@@ -240,9 +262,13 @@ local function assert_same_init_opts(opts)
   end
 
   assert(opts and opts.bridge, "phantom.module requires opts.bridge")
+  assert(opts.credentials, "phantom.module requires opts.credentials")
 
   assert(default_init_opts.bridge == opts.bridge,
     "phantom.module already initialized with a different bridge")
+
+  assert(default_init_opts.credentials == opts.credentials,
+    "phantom.module already initialized with different credentials")
 
   local current_backend_url = default_init_opts.backend_url
   local requested_backend_url = opts.backend_url
@@ -261,6 +287,7 @@ function Phantom.init(opts_or_url)
   default_instance = make_instance(opts)
   default_init_opts = {
     bridge = opts.bridge,
+    credentials = opts.credentials,
     backend_url = opts.backend_url
   }
   return default_instance
