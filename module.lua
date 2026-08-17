@@ -36,6 +36,21 @@ local function is_account_linked_error(err)
   return error_code(err) == "account_linked" or tostring(err):find("AccountLinked") ~= nil
 end
 
+local function linked_account_provider(err)
+  if type(err) ~= "table" then
+    return nil
+  end
+  if type(err.data) == "table" then
+    if type(err.data.provider) == "string" then
+      return err.data.provider
+    end
+    if type(err.data.data) == "table" and type(err.data.data.provider) == "string" then
+      return err.data.data.provider
+    end
+  end
+  return nil
+end
+
 local function resolve_options(opts_or_url)
   if type(opts_or_url) == "table" then
     return opts_or_url
@@ -87,7 +102,11 @@ local function make_instance(opts_or_url)
       if err then
         if is_account_linked_error(err) then
           self:log("auth.guest.account_linked", { error_code = "account_linked" })
-          callback(nil, "AccountLinked")
+          callback(nil, {
+            code = "account_linked",
+            provider = linked_account_provider(err),
+            message = "AccountLinked",
+          })
         else
           self:log("auth.guest.failed", { error_code = error_code(err) })
           callback(nil, err)

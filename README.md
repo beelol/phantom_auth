@@ -21,6 +21,9 @@ phantom.link_account("gamecenter", current_backend_token, callback)
 
 `auto_sign_in_anon` calls `callback(result, err, info)` where `info.restored`
 reports whether the login used an existing guest credential.
+When the credential belongs to a linked account, `err` is
+`{ code = "account_linked", provider = "apple" | "google" }` so the parent can
+start the matching account-provider flow.
 
 The injected credentials adapter implements `load_guest` and `save_guest`.
 The injected bridge implements `init`, `login_guest`, `sign_in`,
