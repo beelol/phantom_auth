@@ -1,8 +1,6 @@
 # Phantom Auth
 
-Self-contained guest and provider-auth coordinator for Defold. The containing
-app injects its backend bridge and logger; this module never imports parent
-project code.
+Self-contained guest and provider-auth coordinator for Defold. The containing app injects its backend bridge and logger.
 
 ```lua
 local phantom = require "main.phantom.module"
