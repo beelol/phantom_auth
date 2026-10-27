@@ -100,6 +100,41 @@ do
   equal(1, state.provider_calls(), "duplicate challenge cannot reopen provider")
 end
 
+do
+  local auth, state = new_instance()
+  local completions = 0
+  local cancel = auth:sign_in("apple", "guest-token", function() completions = completions + 1 end)
+  equal(true, cancel(), "pending challenge cancellation succeeds")
+  equal(false, cancel(), "pending challenge cancellation is idempotent")
+  state.challenge_callback()({ nonce = "late-nonce" }, nil)
+  equal(0, state.provider_calls(), "cancelled challenge cannot open native UI")
+  equal(0, completions, "cancelled challenge stays silent")
+end
+
+do
+  local auth, state = new_instance()
+  local completions = 0
+  local cancel = auth:sign_in("apple", "guest-token", function() completions = completions + 1 end)
+  state.challenge_callback()({ nonce = "server-nonce" }, nil)
+  equal(1, state.provider_calls(), "provider started before cancellation")
+  equal(true, cancel(), "provider-pending cancellation succeeds")
+  state.provider_callback()({ token = "late-token", user_id = "late-user" }, nil)
+  equal(nil, state.sign_in_payload(), "cancelled provider result cannot submit proof")
+  equal(0, completions, "cancelled provider result stays silent")
+end
+
+do
+  local auth, state = new_instance()
+  local completions = 0
+  local cancel = auth:sign_in("apple", "guest-token", function() completions = completions + 1 end)
+  state.challenge_callback()({ nonce = "server-nonce" }, nil)
+  state.provider_callback()({ token = "apple-token", user_id = "apple-user" }, nil)
+  truthy(state.sign_in_payload(), "proof submitted before cancellation")
+  equal(true, cancel(), "submitted proof cancellation succeeds")
+  state.sign_in_callback()({ token = "committed-token", record = { id = "user-1" } }, nil)
+  equal(0, completions, "late committed proof response stays silent")
+end
+
 for _, case in ipairs({
   { label = "challenge error", challenge = nil, challenge_err = { code = "offline" }, expected = "offline" },
   { label = "missing nonce", challenge = {}, expected = "Provider challenge returned no nonce" },

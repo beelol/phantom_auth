@@ -170,22 +170,28 @@ local function make_instance(opts_or_url)
   end
 
   function self:sign_in(provider, current_auth_token, callback)
-    self:log("auth.provider.started", { provider = provider })
-    if not self.providers.is_provider_available(provider) then
-      local err = "Provider unavailable: " .. tostring(provider)
-      self:log("auth.provider.failed", { provider = provider, error_code = "provider_unavailable" })
-      callback(nil, err)
-      return
-    end
-
     local finished = false
     local function complete(result, err)
       if finished then return end
       finished = true
       callback(result, err)
     end
+    local function cancel()
+      if finished then return false end
+      finished = true
+      return true
+    end
+
+    self:log("auth.provider.started", { provider = provider })
+    if not self.providers.is_provider_available(provider) then
+      local err = "Provider unavailable: " .. tostring(provider)
+      self:log("auth.provider.failed", { provider = provider, error_code = "provider_unavailable" })
+      complete(nil, err)
+      return cancel
+    end
 
     local function request_provider_token(nonce)
+      if finished then return end
       local provider_finished = false
       self.providers.get_provider_token(provider, function(id_data, token_err)
         if provider_finished or finished then return end
@@ -236,7 +242,7 @@ local function make_instance(opts_or_url)
 
     if provider ~= "apple" or not self.bridge.prepare_provider_challenge then
       request_provider_token(nil)
-      return
+      return cancel
     end
 
     local challenge_finished = false
@@ -257,6 +263,7 @@ local function make_instance(opts_or_url)
       end
       request_provider_token(nonce)
     end)
+    return cancel
   end
 
   function self:get_credential_state(provider, user_id, callback)
