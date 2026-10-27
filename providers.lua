@@ -67,26 +67,47 @@ function M.get_gamecenter_debug_state()
   }
 end
 
-function M.get_provider_token(provider, callback)
+function M.get_provider_token(provider, callback, options)
   if provider == "apple" then
     if not M.is_provider_available("apple") then
       callback(nil, "SIWA extension missing")
       return
     end
 
-    siwa.authenticate(function(self, data)
+    local finished = false
+    local function complete(data, err)
+      if finished then return end
+      finished = true
+      callback(data, err)
+    end
+    local function handle_apple_response(self, data)
       if not data then
-        callback(nil, "Apple Auth Failed: no response data")
+        complete(nil, "Apple Auth Failed: no response data")
         return
       end
 
       if data.result == "SUCCESS" and data.identity_token then
-        callback({ token = data.identity_token, user_id = data.user_id }, nil)
+        complete({ token = data.identity_token, user_id = data.user_id }, nil)
         return
       end
 
-      callback(nil, "Apple Auth Failed: " .. tostring(data.message or data.result))
-    end)
+      complete(nil, "Apple Auth Failed: " .. tostring(data.message or data.result))
+    end
+
+    local nonce = options and options.nonce or nil
+    if nonce ~= nil and (type(nonce) ~= "string" or nonce == "") then
+      complete(nil, "Apple Auth Failed: invalid nonce")
+      return
+    end
+    local started
+    if nonce then
+      started = siwa.authenticate(nonce, handle_apple_response)
+    else
+      started = siwa.authenticate(handle_apple_response)
+    end
+    if started == false then
+      complete(nil, "Apple Auth Failed: request did not start")
+    end
   elseif provider == "google" then
     callback(nil, "Google account sign-in is disabled until server token verification is configured")
   elseif provider == "gamecenter" then
