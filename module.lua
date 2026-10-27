@@ -178,30 +178,84 @@ local function make_instance(opts_or_url)
       return
     end
 
-    self.providers.get_provider_token(provider, function(id_data, token_err)
-      if token_err then
-        self:log("auth.provider.failed", { provider = provider, error_code = error_code(token_err) })
-        callback(nil, token_err)
-        return
-      end
+    local finished = false
+    local function complete(result, err)
+      if finished then return end
+      finished = true
+      callback(result, err)
+    end
 
-      self:log("auth.provider.token_received", { provider = provider })
-      self.bridge.sign_in(provider, id_data, current_auth_token, function(result, sign_in_err)
-        if sign_in_err then
-          self:log("auth.provider.failed", { provider = provider, error_code = error_code(sign_in_err) })
-          callback(nil, sign_in_err)
+    local function request_provider_token(nonce)
+      local provider_finished = false
+      self.providers.get_provider_token(provider, function(id_data, token_err)
+        if provider_finished or finished then return end
+        provider_finished = true
+        if token_err then
+          self:log("auth.provider.failed", { provider = provider, error_code = error_code(token_err) })
+          complete(nil, token_err)
           return
         end
 
-        self:log("auth.provider.succeeded", {
-          provider = provider,
-          user_id = result and result.record and result.record.id or "unknown"
-        })
-        if type(result) == "table" and type(id_data) == "table" then
-          result._provider_user_id = id_data.user_id
+        local proof_data = id_data
+        if nonce then
+          if type(id_data) ~= "table" then
+            local err = "Provider returned invalid identity proof"
+            self:log("auth.provider.failed", { provider = provider, error_code = "invalid_provider_proof" })
+            complete(nil, err)
+            return
+          end
+          proof_data = {}
+          for key, value in pairs(id_data) do
+            proof_data[key] = value
+          end
+          proof_data.nonce = nonce
         end
-        callback(result, nil)
-      end)
+
+        self:log("auth.provider.token_received", { provider = provider })
+        local sign_in_finished = false
+        self.bridge.sign_in(provider, proof_data, current_auth_token, function(result, sign_in_err)
+          if sign_in_finished or finished then return end
+          sign_in_finished = true
+          if sign_in_err then
+            self:log("auth.provider.failed", { provider = provider, error_code = error_code(sign_in_err) })
+            complete(nil, sign_in_err)
+            return
+          end
+
+          self:log("auth.provider.succeeded", {
+            provider = provider,
+            user_id = result and result.record and result.record.id or "unknown"
+          })
+          if type(result) == "table" and type(id_data) == "table" then
+            result._provider_user_id = id_data.user_id
+          end
+          complete(result, nil)
+        end)
+      end, nonce and { nonce = nonce } or nil)
+    end
+
+    if provider ~= "apple" or not self.bridge.prepare_provider_challenge then
+      request_provider_token(nil)
+      return
+    end
+
+    local challenge_finished = false
+    self.bridge.prepare_provider_challenge(provider, current_auth_token, function(challenge, challenge_err)
+      if challenge_finished or finished then return end
+      challenge_finished = true
+      if challenge_err then
+        self:log("auth.provider.failed", { provider = provider, error_code = error_code(challenge_err) })
+        complete(nil, challenge_err)
+        return
+      end
+      local nonce = type(challenge) == "table" and challenge.nonce or nil
+      if type(nonce) ~= "string" or nonce == "" then
+        local err = "Provider challenge returned no nonce"
+        self:log("auth.provider.failed", { provider = provider, error_code = "provider_challenge_invalid" })
+        complete(nil, err)
+        return
+      end
+      request_provider_token(nonce)
     end)
   end
 
